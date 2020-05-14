@@ -1,0 +1,251 @@
+---
+title: "Gender Experiment - Power Test - w241 Final Project"
+author: "Daniel Alvarez"
+date: "3/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r,include=FALSE, results='hide'}
+# clear out environment variables
+rm(list=ls())
+
+# set seed for randomization
+set.seed(1)
+```
+
+
+Load packages
+```{r, include=FALSE}
+# load packages 
+library(foreign)
+library(data.table)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(foreign)
+library(zoo)
+library(lmtest) # robust standard errors
+library(sandwich) # robust standard errors
+library(stargazer) # reporting formatted results
+library(magrittr) # printing document
+library(pwr) # estimating power
+```
+
+
+## Analyze the pilot study outcomes and power analysis
+
+#### Analyze overall compliance rates data
+
+Read in compliance rates in pilot study data.
+```{r}
+compliance_rates <- fread('./compliance_rates_pilot.csv')
+compliance_rates
+```
+
+Filter out pilot study assignments by `is_pilot` == TRUE
+
+```{r}
+cr_pilot <- compliance_rates[is_pilot==TRUE]
+cr_pilot
+```
+
+Estimate the treatment effect among compliers (CACE) in the pilot study.
+
+```{r}
+pilot_compliers <- cr_pilot[experiment_status == 'C']
+pilot_compliers
+
+# show mean comply rates by assignment status in the pilot
+pilot_compliers[,.('mean_comply_rate'=mean(comply_rate)),keyby=.(assignment_status)]
+
+# estimate treatment effect for the male voice treatment
+pilot_ate_tm <- mean(pilot_compliers[pilot_compliers$assignment_status=='TM',]$comply_rate)-mean(pilot_compliers[pilot_compliers$assignment_status=='C',]$comply_rate)
+pilot_ate_tm 
+
+# estimate treatment effect for the female voice treatment
+pilot_ate_tf <-mean(pilot_compliers[pilot_compliers$assignment_status=='TF',]$comply_rate)-mean(pilot_compliers[pilot_compliers$assignment_status=='C',]$comply_rate)
+pilot_ate_tf 
+
+# estimate effect between male and female voice treatments
+pilot_ate_treat <-mean(pilot_compliers[pilot_compliers$assignment_status=='TM',]$comply_rate)-mean(pilot_compliers[pilot_compliers$assignment_status=='TF',]$comply_rate)
+pilot_ate_treat
+
+```
+
+Conduct a t-test to observe differences between the treatment (male voice) mean and the control mean of proportions. We cannot conduct the t-test in differences between the treatment (female voice) mean and the control mean of proportions, since we only have one data point for the female voice treatment. 
+
+```{r}
+# vectors with bids for control and treatment groups
+pilot_tm <- pilot_compliers[pilot_compliers$assignment_status=='TM', comply_rate]
+pilot_tf <- pilot_compliers[pilot_compliers$assignment_status=='TF', comply_rate]
+pilot_c <- pilot_compliers[pilot_compliers$assignment_status=='C', comply_rate]
+pilot_t <- pilot_compliers[pilot_compliers$assignment_status!='C', comply_rate]
+
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result <- t.test(pilot_tm, pilot_c)
+t_test_result
+
+```
+We observe from the pilot that there the treatment effect for the male voice treatment is not statistically different from zero with a p-value in the t-test of `r t_test_result$p.value`.
+
+Estimate causal treatment effect using regression. 
+
+```{r}
+# naive regression of the comply rate on the assignment status 
+naive_reg <- lm(pilot_compliers[,comply_rate]~as.factor(pilot_compliers[,assignment_status]))
+
+# estimate robust standard errors
+naive_reg$vcovHC_ <- vcovHC(naive_reg , type='HC0')
+naive_reg $robustse <- sqrt(diag(naive_reg $vcovHC_))
+
+# show regression results with robust standard errors
+coeftest(naive_reg , naive_reg$vcovHC_)
+
+# report the formatted regression results
+stargazer(naive_reg,
+          type = 'text', 
+          se=list(naive_reg$robustse),
+          add.lines = list(c('SE', 'Robust')),
+          header=F)
+
+```
+
+The naive regression of comply rate on assignment status reveals a statistically significant effect for the female voice treatment, which is unsurprising given the very low sample size with p-value of `r coeftest(naive_reg , naive_reg$vcovHC_)[2,4]`.
+
+The regression of comply rate on assignment status adjusting for the subject gender and age covariates might tell a more nuanced story.
+
+```{r}
+# regression of the comply rate on the assignment status with covariate adjustment for subject gender and age
+reg_pilot1  <- pilot_compliers[,lm(comply_rate ~ as.factor(assignment_status)+gender+age)]
+#summary(reg_pilot1)
+
+## one way clustering by gender variable
+reg_pilot1$vcovCL1_ <- vcovCL(reg_pilot1, cluster = pilot_compliers[ , gender])
+
+# save the clustered standard errors
+reg_pilot1$cluster1se <- sqrt(diag(reg_pilot1$vcovCL1_))
+
+# estimate robust standard errors
+reg_pilot1$vcovHC_ <- vcovHC(reg_pilot1, type='HC0')
+reg_pilot1$robustse <- sqrt(diag(reg_pilot1$vcovHC_))
+
+# show regression results with robust standard errors
+coeftest(reg_pilot1, reg_pilot1$vcovHC_)
+
+# show regression results with clustered standard errors
+#coeftest(reg_pilot1, reg_pilot1$vcovCL1_)
+
+# report the formatted regression results
+stargazer(reg_pilot1,
+          type = 'text', 
+          se=list(reg_pilot1$robustse),
+          add.lines = list(c('SE', 'Robust')),
+          header=F)
+```
+
+
+When we include the subject's gender and age and run the regression with clustered standard errors on the subject's gender, we get statistically significant treatment effects. There is strong, positive treatment effect for the female voice treatment (with coefficient estimate `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[2]` and robust standard error of `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[2,2]`). There is slight negative treatment effect for the male voice treatment (with coefficient estimate `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[3]` and robust standard error of `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[3,2]`). The coefficient on gender reveals a negative treatment effect for male subjects (with coefficient estimate `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[4]` and robust standard error of `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[4,2]`). The coefficient on age reveals a small, negative treatment effect for older subjects (with coefficient estimate `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[5]` and robust standard error of `r coeftest(reg_pilot1, reg_pilot1$vcovCL1_)[5,2]`). Of course, given just 7 observations in the pilot, we cannot draw any meaningful effects from this analysis. 
+
+## Power calculation
+
+According to List et al. (2008), the power of a statistical test is the probability that it will correctly lead to the rejection of the null hypothesis (the probability of a Type II error is 1-power, and is equal to the probability of falsely not rejecting the null hypothesis). The idea behind the choice of optimal sample sizes in this scenario is that the sample sizes have to be just large enough so that the experimenter (1) does not falsely reject the null hypothesis that the population treatment and control outcomes are equal, i.e., commit a Type I error; and (2) does not falsely accept the null hypothesis when the actual difference is equal to $\delta$, i.e. commit a Type II error. A simple rule of thumb to maximize power given a fixed experimental budget naturally follows: the ratio of the sample sizes is equal to the ratio of the standard deviations of outcomes.
+
+
+Assuming the hypothetical effect size to be achieved should be 0.5, whereby average comply rate for those in the control is 0.5 and average comply rate for those in the treatment is 1.
+
+```{r}
+# assume effectsize from the t_test_result
+effectsize <- 0.5
+effectsize
+```
+ 
+Compute the appropriate sample size for the given effect size, significance level and power. We use the test of proportions. 
+
+```{r}
+# test of proportions
+pwr.2p.test(h = effectsize, n = NULL , sig.level = .05, power = .6 )
+
+```
+
+Assuming a power of 60%, significance level $/alpha$ = .05 and effect size of 0.5, we would need sample size of `r round(pwr.2p.test(h = effectsize, n = NULL , sig.level = .05, power = .6 )$n,0)` in both groups.
+
+
+Given the known sample sizes in the study, assuming effect size of `r effectsize` and significance level $/alpha$ = .05, we can compute the power in the study as follows:
+
+
+```{r}
+# number of observations in the control and treatment groups in the study
+n_control = 33
+n_treat = 39
+n_treatmale = 22
+n_treatfemale = 17
+
+# compute the power for the overall control and combined treatment groups given the known sample sizes in the study
+pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treat , sig.level = .05, power = NULL )
+
+# compute the power for the overall control and male audio treatment groups given the known sample sizes in the study
+pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treatmale , sig.level = .05, power = NULL )
+
+# compute the power for the overall control and female audio treatment groups given the known sample sizes in the study
+pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treatfemale , sig.level = .05, power = NULL )
+
+
+# compute power assuming we have evenly split subjects into the control and treatment groups
+x = 72/3
+pwr.2p2n.test(h = effectsize, n1 = x , n2 = x , sig.level = .05, power = NULL )
+
+
+# pwr.t2n.test(n1 = n_control , n2=n_treat , d = 0.5, sig.level =.05, power =NULL)
+#samplesize(t_alpha, t_beta, var_control, var_treat,pi_control, pi_treat, effectsize)
+```
+The power of our study will be `r pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treat , sig.level = .05, power = NULL)$power`, suggesting a moderately-powered experiment.
+
+If we consider the studies with the individual treatment effects (male and female audio voices) only, the power will be a smaller `r pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treatmale , sig.level = .05, power = NULL)$power` and `r pwr.2p2n.test(h = effectsize, n1 = n_control , n2 = n_treatfemale , sig.level = .05, power = NULL)$power` for the male and female audio treatment studies, respectively.
+
+As an exposition, we can visualize power curves below to understand the relationship with effect size and sample size. Intuitively, to achieve an adequately-powered small effect size, we would need larger sample sizes.
+
+```{r}
+# power values
+p <- seq(.2,.9,.1)
+np <- length(p)
+
+# range of effect sizes
+h <- seq(.2,1,.05)
+nh <- length(h)
+
+# obtain sample sizes
+samsize <- array(numeric(nh*np), dim=c(nh,np))
+for (i in 1:np){
+  for (j in 1:nh){
+    result <- pwr.2p.test(h = h[j], n = NULL , sig.level = .05, power = p[i])
+    samsize[j,i] <- ceiling(result$n)
+  }
+}
+
+# set up graph
+xrange <- range(h)
+yrange <- round(range(samsize))
+colors <- rainbow(length(p))
+plot(xrange, yrange, type="n",
+  xlab="Effect size",
+  ylab="Sample Size (n)" )
+
+# add power curves
+for (i in 1:np){
+  lines(h, samsize[,i], type="l", lwd=2, col=colors[i])
+}
+
+# add annotation (grid lines, title, legend)
+abline(v=0, h=seq(0,yrange[2],50), lty=2, col="grey89")
+abline(h=0, v=seq(xrange[1],xrange[2],.02), lty=2,
+   col="grey89")
+title("Sample Size Estimation for Effect Size, Sig=0.05 (Two-tailed)")
+legend("topright", title="Power", as.character(p),
+   fill=colors)
+```
+

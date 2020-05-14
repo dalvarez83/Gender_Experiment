@@ -1,0 +1,936 @@
+---
+title: "Gender Experiment - Power Test - w241 Final Project"
+author: "Daniel Alvarez, Bethany Keller, Austin Doolittle"
+date: "3/30/2020"
+output:
+    github_document: default
+    pdf_document: default
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(
+    inputFile, encoding = encoding,
+    output_format = c('github_document', 'pdf_document'))
+    })
+# output:
+#   rmarkdown::github_document:
+#       toc: true
+# output:
+#   pdf_document:
+#     toc: true
+#     toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r,include=FALSE, results='hide'}
+# clear out environment variables
+rm(list=ls())
+
+# set seed for randomization
+set.seed(1)
+```
+
+
+Load packages
+```{r, include=FALSE}
+# load packages 
+library(foreign)
+library(data.table)
+library(knitr)
+library(dplyr)
+library(ggplot2)
+library(foreign)
+library(zoo)
+library(lmtest) # robust standard errors
+library(sandwich) # robust standard errors
+library(stargazer) # reporting formatted results
+library(magrittr) # printing document
+library(pwr) # estimating power
+```
+
+Write repeatable functions used throughout this exercise.
+
+```{r write repeatable functions}
+# show mean comply rates by assignment status in the pilot
+complyratesbytreatment <- function(dt) { 
+  return(dt[,.('mean_comply_rate'=mean(comply)),keyby=.(assignment_status)])
+  }
+
+# estimate treatment effect for the male voice treatment
+ate_treatmentmale <- function(dt) {
+  return(mean(dt[dt$assignment_status=='TM',]$comply)-mean(dt[dt$assignment_status=='C',]$comply))
+}
+
+# estimate treatment effect for the female voice treatment
+ate_treatmentfemale <- function(dt) {
+  return(mean(dt[dt$assignment_status=='TF',]$comply)-mean(dt[dt$assignment_status=='C',]$comply))
+}
+
+# estimate effect between male and female voice treatments
+ate_treatment_btwnmalefemale <- function(dt) {
+  return(mean(dt[dt$assignment_status=='TM',]$comply)-mean(dt[dt$assignment_status=='TF',]$comply))
+}
+
+# conduct a two-sample t-test between male audio treatment and control
+t_test_result <- function(dt, treatment, control) {
+  # vectors with bids for control and treatment groups
+  optimal_t <- dt[dt$assignment_status==treatment, comply]
+  optimal_c <- dt[dt$assignment_status==control, comply]
+  return(t.test(optimal_t, optimal_c))
+}
+
+# regression of the comply rate on the assignment status with covariate adjustment for subject gender and age
+reg <- function(data){
+  data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age)]
+}
+
+# regression of the comply rate on the assignment status with covariate adjustment for subject gender and age and interaction terms
+reg_interaction <- function(data){
+  data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age+gender*as.factor(assignment_status)+age*as.factor(assignment_status))]
+}
+
+# report regression results with robust standard errors
+reg_agg_robust <- function(data){
+  reg <- data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age)]
+  return(coeftest(reg, vcovHC(reg, type='HC3')))
+}
+
+# report regression results with robust standard errors and interaction terms
+reg_agg_robust_interaction <- function(data){
+  reg <- data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age+gender*as.factor(assignment_status)+age*as.factor(assignment_status))]
+  return(coeftest(reg, vcovHC(reg, type='HC3')))
+}
+
+# regression of the comply rate on the assignment status with covariate adjustment for subject gender and age
+# report regression results with clustered standard errors at subject ID level
+reg_agg_clustered <- function(data){
+  reg <- data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age)]
+  return(coeftest(reg, vcovCL(reg, cluster = data[ ,subject_id])))
+}
+
+# report regression results with clustered standard errors at subject ID level and interaction terms
+reg_agg_clustered_interaction <- function(data){
+  reg <- data[,lm(comply_rate ~ as.factor(assignment_status)+gender+age+gender*as.factor(assignment_status)+age*as.factor(assignment_status))]
+  return(coeftest(reg, vcovCL(reg, cluster = data[ ,subject_id])))
+}
+
+# logistic regression of the comply rate on the assignment status with covariate adjustment for subject gender and age
+logistic_reg <- function(data){
+  data[,glm(comply ~ as.factor(assignment_status)+gender+age+as.factor(subject_id), family = "binomial")]
+} 
+
+# report logistic regression results with robust standard errors
+logistic_reg_robust <- function(data){
+  logistic <- data[,glm(comply ~ as.factor(assignment_status)+gender+age+as.factor(subject_id), family = "binomial")]
+  return(coeftest(logistic,vcovHC(logistic, type='HC3')))
+}
+
+# report logistic regression results with clustered standard errors
+logistic_reg_clustered <- function(data){
+  logistic <- data[,glm(comply ~ as.factor(assignment_status)+gender+age+as.factor(subject_id), family = "binomial")]
+  return(coeftest(logistic,vcovHC(logistic, cluster = data[ ,subject_id])))
+}
+
+# robust standard errors
+robust_se <- function(mod, type = 'HC3') { 
+  sqrt(diag(vcovHC(mod, type)))
+}
+
+# clustered standard errors
+cluster_se <- function(mod, data) { 
+  sqrt(diag(vcovCL(mod, cluster=data[,subject_id])))
+}
+
+```
+
+## Analyze all moves data
+
+We performed several analyses on the all moves dataset comprising each suggested move outcome, as follows:
+- 1. Analysis of comply rates for optimal suggested moves
+- 2. Analysis of comply rates for non-optimal suggested moves
+- 3. Analysis of comply rates by game number (in order to examine whether there is a trend in compliance rates as the number of games played increases)
+- 4. Analysis of comply rates for order of play moves (in order to examine whether compliance increases with play move number)
+- 5. Analysis of comply rates by gender of subject
+
+
+Read in all moves.
+
+```{r}
+all_moves <- fread('./all_moves_final.csv')
+all_moves
+```
+
+Create binary comply variable for if suggested move was taken or not
+```{r}
+# create a binary comply variable for if suggested move was taken or not
+all_moves[, comply:=ifelse((suggested_move_row==move_taken_row)&(suggested_move_column==move_taken_column),1,0)] 
+```
+
+
+Explore data
+```{r}
+str(all_moves)
+
+summary(all_moves)
+```
+
+Create subsets of the data for optimal and non-optimal suggested moves
+
+```{r}
+# filter out compliers in the study and optimal suggested moves
+all_moves_optimal <- all_moves[(experiment_status == 'C') & (is_suggested_move_optimal==TRUE)]
+all_moves_nonoptimal <- all_moves[(experiment_status == 'C') & (is_suggested_move_optimal==FALSE)]
+
+# number of rows
+nrow(all_moves_optimal)
+nrow(all_moves_nonoptimal)
+```
+
+
+Create an aggregate dataset with mean optimal suggested move rates per subject
+
+```{r}
+# collapse the dataset by mean optimal move
+all_moves_agg <- all_moves[experiment_status == 'C', list(mean_optimal_move=mean(is_suggested_move_optimal, na.rm=T)), keyby=subject_id]
+head(all_moves_agg)
+nrow(all_moves_agg)
+
+```
+
+Create an aggregate dataset with mean compliance rates per subject for optimal suggested moves data subset.
+
+```{r}
+# collapse the dataset by mean optimal move
+optimal_moves_agg <- all_moves_optimal[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T), assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+# show snapshot of aggregated dataset
+head(optimal_moves_agg)
+nrow(optimal_moves_agg)
+
+# show distribution of compliance rates by subject
+hist(optimal_moves_agg$comply_rate, main="Histogram of compliance rates by subject for optimal moves", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=50)
+```
+
+Create an aggregate dataset with mean compliance rates per subject for non-optimal suggested moves data subset.
+
+```{r}
+# collapse the dataset by mean optimal move
+nonoptimal_moves_agg <- all_moves_nonoptimal[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T), assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+# show snapshot of aggregated dataset
+head(nonoptimal_moves_agg)
+nrow(nonoptimal_moves_agg)
+
+# show distribution of non-compliance rates by subject
+hist(nonoptimal_moves_agg$comply_rate, main="Histogram of compliance rates by subject for non-optimal moves", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=50)
+
+```
+
+
+
+## 1. Analysis of comply rates for optimal suggested moves
+
+See distribution of optimal moves for each subject. Some subject received more optimal moves than others, but distribution of proportion of optimal suggested moves by subject should be broadly symmetric since move suggestions were random.
+
+```{r}
+# cross tab subject id and boolean value for optimal move suggestion
+table(all_moves$subject_id, all_moves$is_suggested_move_optimal)
+
+# show distribution of proportion of optimal moves by subject
+hist(all_moves_agg$mean_optimal_move, main="Histogram of proportion of suggested optimal moves", xlab="Proportion of suggested optimal moves", ylab = "Frequency", breaks=50)
+```
+
+### Estimate treatment effects for optimal move and non-optimal move datasets separately
+
+#### Estimate the treatment effect among the optimal move suggestion recipients
+
+
+
+```{r estimate comply rates}
+
+complyratesbytreatment(dt=all_moves_optimal)
+ate_treatmentmale(dt=all_moves_optimal)
+ate_treatmentfemale(dt=all_moves_optimal)
+ate_treatment_btwnmalefemale(dt=all_moves_optimal)
+
+# report average treatment effects output in nicer format
+kable(complyratesbytreatment(dt=all_moves_optimal))
+```
+
+
+For the optimal suggested moves only, conduct a t-test to observe differences between the treatments (male voice and female voices) mean and the control mean of proportions.
+
+
+```{r two-sample t-test}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_optimal_tm <- t_test_result(all_moves_optimal, 'TM', 'C')
+t_test_result_optimal_tf <- t_test_result(all_moves_optimal, 'TF', 'C')
+t_test_result_optimal_t <- t_test_result(all_moves_optimal, 'TM', 'TF')
+
+t_test_result_optimal_tm
+t_test_result_optimal_tf
+t_test_result_optimal_t
+```
+
+We observe from the outcome data for optimal suggested moves that the treatment effect for the male voice treatment is statistically significant with a p-value in the t-test of `r t_test_result_optimal_tm$p.value`. Also, the treatment effect for female voice treatment is statistically different from zero with a p-value in the t-test of `r t_test_result_optimal_tf$p.value`. The t-test comparing the proportions for the male and female voice treatment is not statistically different from zero.
+
+The linear regression of the aggregated comply rate on assignment status adjusting for the subject gender and age covariates and with subject id-level fixed effects tells gives back the estimated treatment effect.
+
+```{r linear regression for optimal moves}
+# linear regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with robust standard errors
+reg_agg_robust(data=optimal_moves_agg)
+
+# linear regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with clustered standard errors
+reg_agg_clustered(data=optimal_moves_agg)
+
+```
+
+Report the formatted linear regression results on aggregated data for optimal move data.
+
+```{r}
+# report the formatted regression results
+stargazer(reg(data=optimal_moves_agg), reg(data=optimal_moves_agg), reg_interaction(data=optimal_moves_agg),reg_interaction(data=optimal_moves_agg),
+          type = 'text', 
+          se = list(robust_se(reg(data=optimal_moves_agg)), cluster_se(reg(data=optimal_moves_agg),optimal_moves_agg),robust_se(reg_interaction(data=optimal_moves_agg)), cluster_se(reg_interaction(data=optimal_moves_agg),optimal_moves_agg)),
+          add.lines = list(c('SE', 'Robust', 'Clustered', 'Robust', 'Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+```
+
+
+
+The logistic regression of the binary comply outcome on assignment status adjusting for the subject gender and age covariates and with subject id-level fixed effects might tell a more nuanced story. Report results with both robust standard errors and clustering at the subject ID level. Clustering at the subject ID level is important since the number of the moves (and therefore, number of observations) may differ across subjects. Clustering ensures that the standard errors reflects the tighter variation introduced at the subject identifier level.
+
+```{r logistic regression for optimal moves}
+# logistic regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with robust standard errors
+logistic_reg_robust(data=all_moves_optimal)
+
+
+# logistic regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with clustered standard errors on subject id
+logistic_reg_clustered(data=all_moves_optimal)
+
+```
+
+Report the formatted logistic regression results for optimal move data.
+
+```{r}
+# report the formatted regression results
+stargazer(logistic_reg(data=all_moves_optimal), logistic_reg(data=all_moves_optimal),
+          type = 'text', 
+          se = list(robust_se(logistic_reg(data=all_moves_optimal)), cluster_se(logistic_reg(data=all_moves_optimal),all_moves_optimal)),
+          add.lines = list(c('SE', 'Robust', 'Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+```
+
+
+Convert coefficients of logistic regression into odds ratios.
+
+```{r}
+# convert the coefficients into odds ratios
+exp(coef(logistic_reg(data=all_moves_optimal)))
+
+## odds ratios and 95% CI
+kable(exp(cbind(OR = coef(logistic_reg(data=all_moves_optimal)), confint(logistic_reg(data=all_moves_optimal)))))
+```
+
+
+## 2. Analysis of comply rates for non-optimal suggested moves
+
+#### Estimate the treatment effect among the non-optimal move suggestion recipients
+
+```{r estimate comply rates}
+complyratesbytreatment(dt=all_moves_nonoptimal)
+ate_treatmentmale(dt=all_moves_nonoptimal)
+ate_treatmentfemale(dt=all_moves_nonoptimal)
+ate_treatment_btwnmalefemale(dt=all_moves_nonoptimal)
+
+# report average treatment effects output in nicer format
+kable(complyratesbytreatment(dt=all_moves_nonoptimal))
+```
+
+For the optimal suggested moves only, conduct a t-test to observe differences between the treatments (male voice and female voices) mean and the control mean of proportions.
+
+
+```{r two-sample t-test}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_nonoptimal_tm <- t_test_result(all_moves_nonoptimal, 'TM', 'C')
+t_test_result_nonoptimal_tf <- t_test_result(all_moves_nonoptimal, 'TF', 'C')
+t_test_result_nonoptimal_t <- t_test_result(all_moves_nonoptimal, 'TM', 'TF')
+
+t_test_result_nonoptimal_tm
+t_test_result_nonoptimal_tf
+t_test_result_nonoptimal_t 
+```
+
+We observe from the pilot for non-optimal suggested moves that there the treatment effect for the male voice treatment is not statistically different from zero with a p-value in the t-test of `r t_test_result_nonoptimal_tm$p.value`. However, the treatment effect for female voice treatment is statistically different from zero with a p-value in the t-test of `r t_test_result_nonoptimal_tf$p.value`.
+
+The linear regression of the aggregated comply rate on assignment status adjusting for the subject gender and age covariates and with subject id-level fixed effects tells gives back the estimated treatment effect.
+
+```{r linear regression for non-optimal moves}
+# linear regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with robust standard errors
+reg_agg_robust(data=nonoptimal_moves_agg)
+
+# linear regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with clustered standard errors
+reg_agg_clustered(data=nonoptimal_moves_agg)
+
+```
+
+Report the formatted linear regression results on aggregated data for nonoptimal move data.
+
+```{r}
+# report the formatted regression results
+stargazer(reg(data=nonoptimal_moves_agg), reg(data=nonoptimal_moves_agg), reg_interaction(data=nonoptimal_moves_agg), reg_interaction(data=nonoptimal_moves_agg),
+          type = 'text', 
+          se = list(robust_se(reg(data=nonoptimal_moves_agg)), cluster_se(reg(data=nonoptimal_moves_agg),nonoptimal_moves_agg),robust_se(reg_interaction(data=nonoptimal_moves_agg)), cluster_se(reg_interaction(data=nonoptimal_moves_agg),nonoptimal_moves_agg)),
+          add.lines = list(c('Move Type', 'Nonoptimal Moves', 'Nonoptimal Moves', 'Nonoptimal Moves', 'Nonoptimal Moves'),c('SE', 'Robust', 'Clustered', 'Robust', 'Clustered')),
+          omit.stat = c('ser', 'F'),
+          header=F)
+```
+
+The logistic regression of the binary comply outcome on assignment status adjusting for the subject gender and age covariates and with subject id-level fixed effects might tell a more nuanced story. Report results with both robust standard errors and clustering at the subject ID level.
+
+```{r logistic regression for non-optimal moves}
+# logistic regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with robust standard errors
+logistic_reg_robust(data=all_moves_nonoptimal)
+
+
+# logistic regression of the comply rate on the assignment status with covariate adjustment for subject gender and age reported with clustered standard errors on subject id
+logistic_reg_clustered(data=all_moves_nonoptimal)
+
+```
+
+Report the formatted regression results for logistical regression for logistic regression.
+
+```{r formatted logistic regression results for non-optimal moves}
+# report the formatted regression results
+stargazer(logistic_reg(data=all_moves_nonoptimal), logistic_reg(data=all_moves_nonoptimal),
+          type = 'text', 
+          se = list(robust_se(logistic_reg(data=all_moves_nonoptimal)), cluster_se(logistic_reg(data=all_moves_nonoptimal),all_moves_nonoptimal)),
+          add.lines = list(c('SE', 'Robust', 'Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+```
+
+Convert coefficients of logistic regression into odds ratios.
+
+```{r}
+# convert the coefficients into odds ratios
+exp(coef(logistic_reg(data=all_moves_nonoptimal)))
+
+## odds ratios and 95% CI
+#kable(exp(cbind(OR = coef(logistic_reg(data=all_moves_nonoptimal)), confint(logistic_reg(data=all_moves_nonoptimal)))))
+```
+
+## 3. Analysis of comply rates by game number 
+
+This analysis is conducted in order to examine whether there is a trend in compliance rates as the number of games played increases. We might suspect that compliance decreases with continued game play differentially by type of treatment.
+
+Conduct diagnostic checks on the game number data. Note that there is 1 subject that attritted by not completing the fifth game. This was just observed as due to a technical bug issue in the pilot game play whereby a player could opt out of the final game and go right to the post-treatment survey evaluation. This was subsequently modified changed in the full experimental roll-out. 
+
+```{r diagnostic checks on game number data}
+# check unique number of game numbers
+kable(unique(all_moves$game_number))
+
+# check number of moves played for each game number
+kable(table(all_moves$game_number))
+
+# cross-tab number of moves played for each game number by treatment assignment
+kable(table(all_moves$game_number, all_moves$assignment_status))
+
+# assess attrition if not all players completed each game
+kable(table(all_moves$game_number, all_moves$subject_id))
+```
+
+First, create subsets of the data corresponding to each game.
+
+
+```{r subset data corresponding to game number, include=FALSE}
+all_moves_game0 <- all_moves[game_number == 0]
+all_moves_game1 <- all_moves[game_number == 1]
+all_moves_game2 <- all_moves[game_number == 2]
+all_moves_game3 <- all_moves[game_number == 3]
+all_moves_game4 <- all_moves[game_number == 4]
+```
+
+
+Create aggregated datasets for each of the `all moves subsets` by subject ID.
+
+```{r create aggregated datasets}
+# collapse the datasets by mean compliance by subject ID
+all_moves_game0_agg <- all_moves_game0[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_game1_agg <- all_moves_game1[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_game2_agg <- all_moves_game2[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_game3_agg <- all_moves_game3[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_game4_agg <- all_moves_game4[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+# show snapshot of aggregated dataset
+nrow(all_moves_game0_agg)
+nrow(all_moves_game1_agg)
+nrow(all_moves_game2_agg)
+nrow(all_moves_game3_agg)
+nrow(all_moves_game4_agg)
+```
+
+Examine compliance distributions by game.
+
+```{r histogram compliance rates for each game by subject}
+# show distribution of compliance rates for each game by subject
+par(mfrow=c(3,2))
+
+hist(all_moves_game0_agg$comply_rate, main="Compliance rates by subject for Game 1", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=20)
+
+hist(all_moves_game1_agg$comply_rate, main="Compliance rates by subject for Game 2", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=20)
+
+hist(all_moves_game2_agg$comply_rate, main="Compliance rates by subject for Game 3", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=20)
+
+hist(all_moves_game3_agg$comply_rate, main="Compliance rates by subject for Game 4", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=20)
+
+hist(all_moves_game4_agg$comply_rate, main="Compliance rates by subject for Game 5", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=20)
+```
+
+
+
+#### Estimate the treatment effects for each game number
+
+```{r treatment effects for first game}
+complyratesbytreatment(dt=all_moves_game0)
+ate_treatmentmale(dt=all_moves_game0)
+ate_treatmentfemale(dt=all_moves_game0)
+ate_treatment_btwnmalefemale(dt=all_moves_game0)
+
+# report mean comply rates in nice format
+kable(complyratesbytreatment(dt=all_moves_game0))
+```
+
+
+```{r treatment effects for second game}
+complyratesbytreatment(dt=all_moves_game1)
+ate_treatmentmale(dt=all_moves_game1)
+ate_treatmentfemale(dt=all_moves_game1)
+ate_treatment_btwnmalefemale(dt=all_moves_game1)
+
+# report mean comply rates in nice format
+kable(complyratesbytreatment(dt=all_moves_game1))
+
+```
+
+
+```{r treatment effects for third game}
+complyratesbytreatment(dt=all_moves_game2)
+ate_treatmentmale(dt=all_moves_game2)
+ate_treatmentfemale(dt=all_moves_game2)
+ate_treatment_btwnmalefemale(dt=all_moves_game2)
+
+# report mean comply rates in nice format
+kable(complyratesbytreatment(dt=all_moves_game2))
+```
+
+
+```{r treatment effects for fourth game}
+complyratesbytreatment(dt=all_moves_game3)
+ate_treatmentmale(dt=all_moves_game3)
+ate_treatmentfemale(dt=all_moves_game3)
+ate_treatment_btwnmalefemale(dt=all_moves_game3)
+
+# report mean comply rates in nice format
+kable(complyratesbytreatment(dt=all_moves_game3))
+```
+
+
+```{r treatment effects for fifth game}
+complyratesbytreatment(dt=all_moves_game4)
+ate_treatmentmale(dt=all_moves_game4)
+ate_treatmentfemale(dt=all_moves_game4)
+ate_treatment_btwnmalefemale(dt=all_moves_game4)
+
+# report mean comply rates in nice format
+kable(complyratesbytreatment(dt=all_moves_game4))
+
+```
+
+Conduct t-test by game
+```{r two-sample t-test for first game}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_game0_tm <- t_test_result(all_moves_game0, 'TM', 'C')
+t_test_result_game0_tf <- t_test_result(all_moves_game0, 'TF', 'C')
+t_test_result_game0_t <- t_test_result(all_moves_game0, 'TM', 'TF')
+
+t_test_result_game0_tm
+t_test_result_game0_tf
+t_test_result_game0_t
+```
+
+```{r two-sample t-test for second game}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_game1_tm <- t_test_result(all_moves_game1, 'TM', 'C')
+t_test_result_game1_tf <- t_test_result(all_moves_game1, 'TF', 'C')
+t_test_result_game1_t <- t_test_result(all_moves_game1, 'TM', 'TF')
+
+t_test_result_game1_tm
+t_test_result_game1_tf
+t_test_result_game1_t
+```
+
+```{r two-sample t-test for third game}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_game2_tm <- t_test_result(all_moves_game2, 'TM', 'C')
+t_test_result_game2_tf <- t_test_result(all_moves_game2, 'TF', 'C')
+t_test_result_game2_t <- t_test_result(all_moves_game2, 'TM', 'TF')
+
+t_test_result_game2_tm
+t_test_result_game2_tf
+t_test_result_game2_t
+
+```
+
+
+```{r two-sample t-test for fourth game}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_game3_tm <- t_test_result(all_moves_game3, 'TM', 'C')
+t_test_result_game3_tf <- t_test_result(all_moves_game3, 'TF', 'C')
+t_test_result_game3_t <- t_test_result(all_moves_game3, 'TM', 'TF')
+
+t_test_result_game3_tm
+t_test_result_game3_tf
+t_test_result_game3_t
+```
+
+
+```{r two-sample t-test for fifth game}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_game4_tm <- t_test_result(all_moves_game4, 'TM', 'C')
+t_test_result_game4_tf <- t_test_result(all_moves_game4, 'TF', 'C')
+t_test_result_game4_t <- t_test_result(all_moves_game4, 'TM', 'TF')
+
+t_test_result_game4_tm
+t_test_result_game4_tf
+t_test_result_game4_t
+```
+
+Show results of linear regressions run on aggregated data for all 5 games with clustered standard errors.
+
+```{r}
+# report the formatted regression results for all games with clustered standard errors.
+stargazer(reg(all_moves_game0_agg), reg(all_moves_game1_agg),reg(all_moves_game2_agg),reg(all_moves_game3_agg),reg(all_moves_game4_agg),
+          type = 'text', 
+          se = list(cluster_se(reg(data=all_moves_game0_agg),all_moves_game0_agg),cluster_se(reg(data=all_moves_game1_agg),all_moves_game1_agg),cluster_se(reg(data=all_moves_game2_agg),all_moves_game2_agg),cluster_se(reg(data=all_moves_game3_agg),all_moves_game3_agg),cluster_se(reg(data=all_moves_game4_agg),all_moves_game4_agg)),
+          add.lines = list(c('Games','Game1','Game2','Game3','Game4','Game5'),c('SE', 'Clustered', 'Clustered','Clustered','Clustered','Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
+
+
+
+
+Show results of logistic regressions run on by move data for all 5 games with clustered standard errors (clustered by subject id).
+
+```{r}
+# report the formatted regression results
+stargazer(logistic_reg(all_moves_game0), logistic_reg(all_moves_game1), logistic_reg(all_moves_game2),logistic_reg(all_moves_game3),logistic_reg(all_moves_game4),
+          type = 'text', 
+          se = list(cluster_se(logistic_reg(all_moves_game0),all_moves_game0), cluster_se(logistic_reg(all_moves_game1),all_moves_game1),cluster_se(logistic_reg(all_moves_game2),all_moves_game2), cluster_se(logistic_reg(all_moves_game3),all_moves_game3),cluster_se(logistic_reg(all_moves_game4),all_moves_game4)), add.lines = list(c('Game No.','Game 1','Game 2','Game 3','Game 4','Game 5'),c('SE', 'Clustered', 'Clustered','Clustered','Clustered','Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
+
+# convert the coefficients of logistic regression into odds ratios
+
+```{r convert coefficients to odd ratios}
+kable(cbind(exp(coef(logistic_reg(all_moves_game0))),exp(coef(logistic_reg(all_moves_game1))),exp(coef(logistic_reg(all_moves_game2))),exp(coef(logistic_reg(all_moves_game3))),exp(coef(logistic_reg(all_moves_game4)))))
+
+```
+
+
+## 4. Analysis of comply rates for order of play moves
+
+The analysis is conducted in order to examine whether compliance increases with play move number.
+
+
+Create dataset for first moves only
+
+```{r create datasets for first, second and third moves only}
+all_moves_move1 <- all_moves[(game_number == 0 & move_number ==1) | (game_number == 1 & move_number ==2) |
+                             (game_number == 2 & move_number ==1) | (game_number == 3 & move_number ==2) |
+                             (game_number == 4 & move_number ==1)]
+
+all_moves_move2 <- all_moves[(game_number == 0 & move_number ==3) | (game_number == 1 & move_number ==4) |
+                             (game_number == 2 & move_number ==3) | (game_number == 3 & move_number ==4) |
+                             (game_number == 4 & move_number ==3)]
+
+all_moves_move3 <-all_moves[(game_number == 0 & move_number ==5) | (game_number == 1 & move_number ==6) |
+                             (game_number == 2 & move_number ==5) | (game_number == 3 & move_number ==6) |
+                             (game_number == 4 & move_number ==5)]
+```
+
+Created aggregated datasets from the ordered move datasets.
+
+```{r create aggregated datasets}
+# collapse the datasets by mean compliance by subject ID
+all_moves_move1_agg <- all_moves_move1[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_move2_agg <- all_moves_move2[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_move3_agg <- all_moves_move3[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+```
+
+Examine compliance distributions by ordered move.
+
+```{r histogram compliance rates for each game by subject}
+# show distribution of compliance rates for each game by subject
+par(mfrow=c(3,1))
+
+hist(all_moves_move1_agg$comply_rate, main="Compliance rates by subject for Move 1", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=30)
+
+hist(all_moves_move2_agg$comply_rate, main="Compliance rates by subject for Move 2", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=30)
+
+hist(all_moves_move3_agg$comply_rate, main="Compliance rates by subject for Move 3", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=30)
+
+```
+
+
+Run diagnostic checks.
+
+```{r diagnostics on datasets}
+# check number of moves played for each game number (should be one)
+kable(table(all_moves_move1$game_number))
+kable(table(all_moves_move2$game_number))
+kable(table(all_moves_move3$game_number))
+
+# cross-tab number of moves played for each game number by treatment assignment
+kable(table(all_moves_move1$game_number, all_moves_move1$assignment_status))
+kable(table(all_moves_move2$game_number, all_moves_move2$assignment_status))
+kable(table(all_moves_move3$game_number, all_moves_move3$assignment_status))
+
+# assess attrition if not all players made a first, second or third move
+kable(table(all_moves_move1$game_number, all_moves_move1$subject_id))
+kable(table(all_moves_move2$game_number, all_moves_move2$subject_id))
+kable(table(all_moves_move3$game_number, all_moves_move3$subject_id))
+```
+
+Estimate treatment effects
+
+```{r estimate treatment effect for first moves only}
+complyratesbytreatment(dt=all_moves_move1)
+ate_treatmentmale(dt=all_moves_move1)
+ate_treatmentfemale(dt=all_moves_move1)
+ate_treatment_btwnmalefemale(dt=all_moves_move1)
+
+kable(complyratesbytreatment(dt=all_moves_move1))
+```
+
+
+```{r estimate treatment effect for second moves only}
+complyratesbytreatment(dt=all_moves_move2)
+ate_treatmentmale(dt=all_moves_move2)
+ate_treatmentfemale(dt=all_moves_move2)
+ate_treatment_btwnmalefemale(dt=all_moves_move2)
+
+kable(complyratesbytreatment(dt=all_moves_move2))
+```
+
+
+```{r estimate treatment effect for third moves only}
+complyratesbytreatment(dt=all_moves_move3)
+ate_treatmentmale(dt=all_moves_move3)
+ate_treatmentfemale(dt=all_moves_move3)
+ate_treatment_btwnmalefemale(dt=all_moves_move3)
+
+kable(complyratesbytreatment(dt=all_moves_move3))
+```
+
+Conduct t-tests by move
+
+```{r two-sample t-test for first moves only}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_move1_tm <- t_test_result(all_moves_move1, 'TM', 'C')
+t_test_result_move1_tf <- t_test_result(all_moves_move1, 'TF', 'C')
+t_test_result_move1_t <- t_test_result(all_moves_move1, 'TM', 'TF')
+
+t_test_result_move1_tm
+t_test_result_move1_tf
+t_test_result_move1_t
+```
+
+
+```{r two-sample t-test for second moves only}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_move2_tm <- t_test_result(all_moves_move2, 'TM', 'C')
+t_test_result_move2_tf <- t_test_result(all_moves_move2, 'TF', 'C')
+t_test_result_move2_t <- t_test_result(all_moves_move2, 'TM', 'TF')
+
+t_test_result_move2_tm
+t_test_result_move2_tf
+t_test_result_move2_t
+```
+
+
+```{r two-sample t-test for second moves only}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_move3_tm <- t_test_result(all_moves_move3, 'TM', 'C')
+t_test_result_move3_tf <- t_test_result(all_moves_move3, 'TF', 'C')
+t_test_result_move3_t <- t_test_result(all_moves_move3, 'TM', 'TF')
+
+t_test_result_move3_tm
+t_test_result_move3_tf
+t_test_result_move3_t
+```
+
+Show results of linear regressions run on aggregated data for all 3 moves with robust standard errors.
+
+```{r}
+# report the formatted regression results
+stargazer(reg(all_moves_move1_agg), reg(all_moves_move2_agg),reg(all_moves_move3_agg),
+          type = 'text', 
+          se = list(robust_se(reg(all_moves_move1_agg)),robust_se(reg(all_moves_move2_agg)),robust_se(reg(all_moves_move3_agg))),
+          add.lines = list(c('Game No.','Move 1','Move 2','Move 3'),c('SE', 'Robust', 'Robust','Robust')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
+
+Show results of linear regressions run on aggregated data for all 3 moves with clustered standard errors.
+
+```{r}
+# report the formatted regression results
+stargazer(reg(all_moves_move1_agg), reg(all_moves_move2_agg),reg(all_moves_move3_agg),
+          type = 'text', 
+          se = list(cluster_se(reg(all_moves_move1_agg),all_moves_move1_agg),cluster_se(reg(all_moves_move2_agg),all_moves_move2_agg),cluster_se(reg(all_moves_move3_agg),all_moves_move3_agg)),
+          add.lines = list(c('Move Order No.','Move 1','Move 2','Move 3'),c('SE', 'Clustered', 'Clustered','Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
+
+
+Show results of logistic regressions run on by move data for the three ordered moves datasets with clustered standard errors (clustered by subject id).
+
+```{r}
+# report the formatted regression results
+stargazer(logistic_reg(all_moves_move1), logistic_reg(all_moves_move2), logistic_reg(all_moves_move3),
+          type = 'text', 
+          se = list(cluster_se(logistic_reg(all_moves_move1),all_moves_move1), cluster_se(logistic_reg(all_moves_move2),all_moves_move2),cluster_se(logistic_reg(all_moves_move3),all_moves_move3)), add.lines = list(c('Game No.','Move 1','Move 2','Move 3'),c('SE', 'Clustered', 'Clustered','Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
+
+
+## 4. Analysis of comply rates by gender of subject participant in the study
+
+The analysis is conducted in order to examine whether treatment effects differ by subject gender
+
+
+Create datasets by subject gender 
+
+```{r create datasets for first, second and third moves only}
+all_moves_male <- all_moves[gender=='M']
+
+all_moves_female <- all_moves[gender=='F']
+
+#count number of observations
+nrow(all_moves_male)
+nrow(all_moves_female)
+```
+
+Created aggregated datasets from the by-gender datasets.
+
+```{r create aggregated datasets}
+# collapse the datasets by mean compliance by subject ID
+all_moves_male_agg <- all_moves_male[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+all_moves_female_agg <- all_moves_female[experiment_status == 'C', list(comply_rate=mean(comply, na.rm=T),assignment_status=unique(assignment_status), gender=unique(gender), age=unique(age)), keyby=subject_id]
+
+```
+
+Examine compliance distributions by-gender
+
+```{r histogram compliance rates for each game by subject}
+# show distribution of compliance rates for each subject gender
+par(mfrow=c(2,1))
+
+hist(all_moves_male_agg$comply_rate, main="Compliance rates for male subjects", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=30)
+
+hist(all_moves_female_agg$comply_rate, main="Compliance rates for female subjects", xlab="Proportion of compliance rates", ylab = "Frequency", breaks=30)
+
+```
+
+Estimate treatment effects
+
+```{r estimate treatment effect for male subjects}
+complyratesbytreatment(dt=all_moves_male)
+ate_treatmentmale(dt=all_moves_male)
+ate_treatmentfemale(dt=all_moves_male)
+ate_treatment_btwnmalefemale(dt=all_moves_male)
+
+kable(complyratesbytreatment(dt=all_moves_male))
+```
+
+
+```{r estimate treatment effect for female subjects}
+complyratesbytreatment(dt=all_moves_female)
+ate_treatmentmale(dt=all_moves_female)
+ate_treatmentfemale(dt=all_moves_female)
+ate_treatment_btwnmalefemale(dt=all_moves_female)
+
+kable(complyratesbytreatment(dt=all_moves_female))
+```
+
+Conduct t-tests by move
+
+```{r two-sample t-test for male subjects only}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_male_tm <- t_test_result(all_moves_male, 'TM', 'C')
+t_test_result_male_tf <- t_test_result(all_moves_male, 'TF', 'C')
+t_test_result_male_t <- t_test_result(all_moves_male, 'TM', 'TF')
+
+t_test_result_male_tm
+t_test_result_male_tf
+t_test_result_male_t
+```
+
+
+
+```{r two-sample t-test for female subjects only}
+# conduct a two-sample t-test and save results to t_test_result variable
+t_test_result_female_tm <- t_test_result(all_moves_female, 'TM', 'C')
+t_test_result_female_tf <- t_test_result(all_moves_female, 'TF', 'C')
+t_test_result_female_t <- t_test_result(all_moves_female, 'TM', 'TF')
+
+t_test_result_female_tm
+t_test_result_female_tf
+t_test_result_female_t
+```
+
+
+Show results of linear regressions run on aggregated data for by-gendered datasets with robust and clustered standard errors.
+
+```{r}
+# report the formatted regression results
+reg_male <- all_moves_male_agg[,lm(comply_rate ~ as.factor(assignment_status)+age)]
+reg_female <- all_moves_female_agg[,lm(comply_rate ~ as.factor(assignment_status)+age)]
+
+stargazer(reg_male, reg_male,reg_female,reg_female,
+          type = 'text', 
+          se = list(robust_se(reg_male),cluster_se(reg_male,all_moves_male_agg),robust_se(reg_female),cluster_se(reg_female,all_moves_female_agg)),
+          add.lines = list(c('Subject Gender','Male','Male','Female','Female'),c('SE', 'Robust', 'Clustered','Robust','Clustered')),
+          #omit.stat = c('ser', 'F'),
+          header=F)
+
+
+```
